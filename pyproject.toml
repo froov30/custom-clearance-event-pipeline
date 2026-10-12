@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ccp"
+version = "0.1.0"
+description = "Customs Clearance Event Pipeline (synthetic data portfolio project)"
+requires-python = ">=3.11"
+# Exact pins, verified against PyPI on 2026-10-11 (DECISIONS.md D-033).
+dependencies = [
+    "confluent-kafka==2.16.0",
+    "pymongo==4.18.3",
+    "pydantic==2.14.0",
+    "fastapi==0.143.0",
+    "uvicorn==0.54.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff==0.17.0",
+    "pytest==9.1.1",
+    "httpx==0.28.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = ["integration: needs the Compose stack; runs only when CCP_INTEGRATION=1"]
