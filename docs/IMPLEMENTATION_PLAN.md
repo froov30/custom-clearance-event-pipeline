@@ -192,4 +192,5 @@ Not built until requested. Each one gets a DECISIONS.md entry before it starts.
 - A Helm chart for the k8s manifests
 - API auth and rate limiting
 - Event-time watermarking and clock-skew handling
+- Alert resolution: mark an alert resolved when its shipment leaves ON_HOLD, so a lag-induced alert (D-064) is visibly closed
 - Interview-prep notes written only from what is actually built

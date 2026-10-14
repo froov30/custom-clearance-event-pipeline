@@ -518,8 +518,168 @@ each (159 s)**. Unit suite: 131 passed. Lint and format clean.
   After all of it `--verify-only --seed 42` still gave **RESULT: MATCH**.
 - **Memory (A2):** `docker stats --no-stream ccp-control-plane` → 1.667 GiB of 3.744 GiB (44.51%) with everything running and 3 processors.
   One reading, after the rebalances.
-- **Not verified:** the pods were not killed to test liveness-probe restarts on kind (the probe is unit-tested and ran in Compose); no run longer
-  than a few minutes; Kafka has no volume, so a broker pod restart loses the topics (D-045; the topics Job re-creates them).
+- **Not verified at the time:** liveness-probe restarts on kind; a run under load; and Kafka had no volume, so a broker pod restart lost
+  the topics (D-045). All three are closed in D-062 and D-063.
+- **Correction (2026-10-14, D-062):** the `kind load docker-image` failure was not "Docker's image store" in general. Loading
+  `ccp:0.1.0` alone works; only the Docker Hub images fail. The tar workaround is no longer needed.
+
+### D-062 Kafka's log on a PVC on kind; load only our own image into kind (P11 follow-up)
+- **Context:** with no volume (D-045), deleting `kafka-0` lost everything. Reproduced on kind: topics before the restart
+  `['customs.events.dlq', 'customs.events.raw', 'customs.events.validated']`, after it `[]`. Committed consumer offsets go with them, so a
+  restart would also have the consumers re-read from their reset position.
+- **Options:** keep D-045 and re-run the topics Job after a restart (still loses messages and offsets); a PVC for the log.
+- **Choice:** `KAFKA_LOG_DIRS=/var/lib/kafka/data` on a 1 Gi `volumeClaimTemplates` PVC (kind's `local-path`, inside the Docker disk on D:,
+  A15). The fixed `CLUSTER_ID` lets the image's start script see the storage as already formatted. A StatefulSet cannot gain a
+  `volumeClaimTemplates` in place, so an existing cluster needs `kubectl delete statefulset kafka` before the apply.
+- **Test:** `test_kafka_keeps_its_log_on_a_volume` (red first, then green); on kind after the fix: `[('customs.events.dlq', 1),
+  ('customs.events.raw', 6), ('customs.events.validated', 6)]` both before and after deleting `kafka-0`.
+- **Compose unchanged (D-045 stands there):** `docker compose restart` keeps the container's filesystem; only `down` drops it, and the
+  tests and demo rely on a fresh start after `down`. Not separately re-tested.
+- **kind image loading, root cause:** `kind load docker-image ccp:0.1.0` alone exits 0. `kind load docker-image mongo:8.0.32` alone fails
+  with `ctr: content digest ... not found`: Docker Hub images are multi-platform indexes, Docker pulled only the amd64 layers, and the node's
+  `ctr import --all-platforms` asks for the rest. Kafka and MongoDB never needed loading (the kubelet pulls them). README step 2 now loads
+  only `ccp:0.1.0`, and says that kind needs a reload plus `kubectl rollout restart` after every rebuild (the stale-image trap from P11).
+
+### D-063 Chaos check on kind: per-shipment audit, larger verified runs, `scripts/kind-chaos.ps1` (A13, pod kills, liveness)
+- **Context:** A13 was only checked on an idle topic, and liveness restarts on kind were never seen. The demo compares totals, so two
+  wrong statuses could in principle cancel out.
+- **Choice (simplicity gate: no new dependency):**
+  - `python -m ccp.processor.audit`: read-only; re-folds every shipment's events and compares `container_id`, `state`, `state_since`,
+    `event_count`, `anomalies`, `anomaly_count` with the stored status (not `updated_at`). It reuses `store._status`, so it checks the
+    stored result against the processor's own fold, not a second implementation. 4 unit tests (red first).
+  - `ccp.demo` forwards unknown flags to the simulator for both producing and `--expect`, so `--shipments 6000 --step-delay 4` is
+    verified against its own manifest. 2 unit tests (red first).
+  - `scripts/kind-chaos.ps1`: phase A under load (scale 1 → 3, graceful processor delete, processor SIGKILL from the node, graceful
+    validator and monitor deletes, scale 3 → 2 → 3); phase B after drain (broker restart, then SIGSTOP on a processor so only the liveness
+    probe can recover it). After each phase: the demo's 16 totals and the audit. Validator kills stay graceful, because a SIGKILLed
+    validator can re-emit an event as a new message, which `duplicates_dropped` counts by design (TRD §17).
+- **Script bug found in the first run:** a one-element result from `Live` was unwrapped to a string, so `[0]` took its first letter
+  (`deleted pod v`). Fixed with `@(...)` at the call sites, checked in isolation, and the run repeated.
+- **Result (clean run, 2026-10-14, `.\scripts\kind-chaos.ps1` on a reset database, after D-064 and D-065): exit 0, `failed checks: 0`,
+  1,132 s.** Load: seed 7, 6,000 shipments, 21,506 messages (clean 18,527, duplicate 907, late 686, malformed 612, bad container 625,
+  unknown reference 149).
+  - Phase A (10:41–10:42 UTC): scaled 1 → 3, deleted a processor pod, SIGKILLed a processor from the node, deleted the validator and
+    monitor pods, scaled 3 → 2 → 3, all while the backlog was in flight. Then **RESULT: MATCH (16/16)** and the audit **5,997 shipments,
+    0 mismatched**. **A13 verified.**
+  - Phase B: deleted `kafka-0` (ready again in 12 s), then SIGSTOP on a processor. The kubelet logged `Unhealthy` ×3 (`Liveness probe
+    failed`), `Container processor failed liveness probe, will be restarted`, and the container restarted **127 s after the freeze**
+    (60 s stale threshold + 3 probe periods of 15 s + the kill); an earlier run measured 129 s. Then **MATCH (16/16)** and the audit
+    **0 of 5,997** again. The SIGKILLed processor from phase A shows `RESTARTS 1` (the kubelet restarted the crashed container).
+  - Offsets across a broker restart (earlier run, same cluster): `ccp-validator`, `ccp-processor`, `ccp-monitor-dlq` each had committed =
+    end of topic (43,012 / 40,240 / 2,772 messages), lag 0, so nothing was re-read from the start.
+- **Not covered:** a broker restart *during* the backlog (the validator could re-emit, which counts as a duplicate by design), and
+  MongoDB pod restarts on kind (the MongoDB-down paths were tested in Compose, D-053/D-054).
+
+### D-064 Hold alerts under processing lag (finding; documented, not changed)
+- **Observed (first chaos run, `HOLD_ALERT_SECONDS=20`):** every total matched except alerts, **2,314 instead of 605**. Ingest lag
+  (`ingested_at - occurred_at`) averaged 84.5 s and peaked at 138.6 s over a 139 s processing window for 21,506 messages. By the
+  shipment's final state: ON_HOLD 605 (the expected ones), CLEARED 891, REJECTED 818. Every extra alert is a hold whose clearing event
+  was still in the backlog when the monitor scanned.
+- **Why:** the monitor compares event time with its wall clock (TRD §17), so lag reads as hold time. A SIGKILLed consumer alone stalls its
+  partitions for the 45 s session timeout, so a 20 s demo threshold cannot survive chaos.
+- **Options:** retract or resolve alerts when a shipment leaves ON_HOLD; alert on an event-time watermark (stalls when a partition goes
+  idle, so open holds would never alert after the stream stops); keep the threshold above worst-case lag.
+- **Choice:** keep the design, document the limit with the measurement, and run the chaos check with `HOLD_ALERT_SECONDS=300` (set on the
+  monitor and api for the run, restored after). With that: **605 = 605**. Alert resolution is listed as an add-on, not built.
+- **Correction:** TRD §15 said a held-then-cleared shipment "can never alert"; it now says this holds only while lag stays inside the
+  margin.
+
+### D-065 The manifest counted shipments with no valid event as UNKNOWN (verifier bug, fixed)
+- **Observed (second chaos run):** 15 of 16 totals matched and the audit found 0 mismatches in 5,997 shipments, but `state UNKNOWN` was
+  expected 502, got 499. `expect()` folded every planned shipment, including 3 whose every message was rejected; the pipeline correctly
+  has no status for a shipment it never received a valid event for. Seed 42 (20 shipments) never hit this.
+- **Fix:** `expect()` folds only shipments with stored events. Test `test_a_shipment_with_every_message_rejected_has_no_state` (red
+  first); the old assertion `sum(state_counts) == len(plan.shipments)` encoded the bug and now compares with shipments that have events.
+  Seed 42's manifest is unchanged (UNKNOWN 1, from a shipment that has events), so the demo, smoke test and CI expectations stand.
+
+### D-066 Test client backend: `httpx2` 2.13.1 replaces `httpx` in the dev extras (issue: deprecation warning)
+- **Context:** every `tests/integration/test_api.py` run printed `StarletteDeprecationWarning: Using httpx with starlette.testclient is
+  deprecated; install httpx2 instead.` Nothing failed, but the warning was a known, unresolved item.
+- **Options:** filter the warning in pytest config (hides a real migration); pin an older Starlette (goes backwards); switch the test
+  client's backend to `httpx2`, which the warning names.
+- **Choice:** `httpx2==2.13.1` (PyPI, uploaded 2026-09-23, requires Python >=3.10) in place of `httpx==0.28.1`, dev extra only. Nothing
+  in `src/` or `tests/` imports `httpx` directly (grep), so only the TestClient backend changes. A dependency, so this line comes first
+  (simplicity gate). Test: `tests/test_test_client.py` (red: exit 1 with the warning as an error; green after the swap).
+- **Trade-off:** `httpx2` is a newer package than `httpx`; the test suite is the check that its behaviour matches for our calls.
+
+### D-067 Validator re-emits are duplicates, and the demo accounts for them (debug of the "validator crash" limit)
+- **Context:** TRD §17 said a validator crash that re-emits an event "adds to" `duplicates_dropped`, and the demo's exact check could not
+  verify it. Every chaos run so far had deleted the validator gracefully, so the case was never exercised.
+- **Diagnosis:** the count is correct, not a defect. A re-emit is a new Kafka message with an event_id already stored, and the processor
+  counts that as a duplicate (D-051). Per run, `duplicates_dropped = validated messages − events_stored`, because every validated
+  message is either the first stored copy of its event_id or a counted duplicate. Redelivery of the same message (a processor crash) is
+  not a new message and is not counted, so it does not enter this identity.
+- **Options:** make validator output exactly-once (a transactional producer with a stable `transactional.id`, offsets committed in the
+  same transaction): correct, but a large change to a stateless service and out of MVP scope; or verify the identity.
+- **Choice:** keep the count, and have the demo derive the re-emits from the `validated` topic:
+  `reemitted = validated − (manifest stored + manifest duplicates)`, and the expected duplicates become `manifest + reemitted`. The demo
+  prints `validator re-emits: N`. Messages on `validated` from earlier runs are excluded: dev mode records the count at its start, and
+  verify-only takes `--validated-baseline N` (default 0, so a fresh stack needs nothing).
+- **Trade-off:** the identity assumes no validated message fails permanently (PROCESSING_ERROR, which sends it to the DLQ and skips the
+  count). That never happened in any run, and if it did the stored counts would show it. Negative `reemitted` means fewer messages than
+  the manifest expects; the stored counts show that too.
+- **Tests:** `tests/test_demo.py` (`reemitted`: 2 re-emits, and 0 when the topic matches the manifest), written red first.
+
+### D-068 Kafka and MongoDB restarts under load; the verifier retries API errors (debug of the two restart gaps)
+- **Context:** D-062 showed a broker restart on an idle topic only. MongoDB had never been restarted on kind.
+- **Diagnosis:** a MongoDB restart makes the API's `/stats` fail for a few seconds (the driver reconnects). The demo's `verify` called the
+  API without handling errors, so one failed request ended the whole check with an exception instead of a retry. That is a defect in the
+  verifier, not in the pipeline (the API and processors recover on their own).
+- **Fix:** `check()` turns an `OSError` from the API into a reported difference, and `verify` keeps polling. The final re-check goes
+  through `check()` too. Test `test_verify_keeps_polling_through_an_api_error`, written red first (the `OSError` escaped).
+- **Chaos:** `scripts/kind-chaos.ps1` phase A now restarts `kafka-0` and `mongo-0` while the backlog is still being processed. Each
+  restart deletes the pod and waits for Ready. Results are in the "Chaos rerun" section below.
+
+### D-069 Hold alerts close when their hold ends (debug of "alerts are never retracted" and the lag false alerts)
+- **Context:** D-064 measured 2,314 alerts for 605 holds under lag, and TRD §17 said alerts are never retracted, so a false alert stayed
+  open for good.
+- **Options:** delete a false alert (loses history and is hard to audit); alert on an event-time watermark (the real fix for lag, but it
+  stalls when a partition goes idle, so an open hold would never alert: the problem listed as an add-on); close the alert when its hold
+  ends (keeps history and makes the stored state correct).
+- **Choice:** close. Alerts gain `resolved_at` (null while open). Each monitor scan runs `resolve_alerts`, which closes an alert when its
+  shipment is no longer `ON_HOLD` with the same `state_since` (`stale_alerts`, a pure function). `/stats` gains `open_alerts`, `/alerts`
+  shows `resolved_at`, and the demo compares **open** alerts with the final `ON_HOLD` count. `alerts_total` still counts every alert raised.
+- **Trade-off, not fixed:** while the backlog is behind, a false alert is still raised and can page someone for the length of the lag.
+  Closing fixes the stored state, not the page. The fix for that is the event-time watermark (add-on).
+- **Simplicity gate:** no dependency. The scan reads every open alert each time; a comment notes the index to add when that gets large.
+- **Tests:** `tests/test_monitor_resolve.py` (5 unit tests, red first), `tests/integration/test_monitor.py` (an alert closes once and is
+  never re-raised), `tests/integration/test_api.py` (`open_alerts` and `resolved_at`), `tests/test_demo.py` (open alerts are compared).
+
+### D-070 Docker Desktop writes to C: (debug of the disk issue): not changed, by rule (D-040)
+- **Diagnosis (measured 2026-10-14):** `C:\Users\Dhruv\AppData\Local\Temp\DockerDesktopUpdates\…Updater….exe`, 335 MB, downloaded by
+  Docker Desktop's own updater. `Temp\…\swap.vhdx`, 68 MB, is the WSL swap disk. Both are written by Docker Desktop, not by the project.
+  Every project file, the Docker disk image (`D:\ccp-data\docker\docker_data.vhdx`, 12.03 GB) and the kind data are on D:.
+- **Why it is not fixed here:** the two fixes live on C: and are outside the project. Docker Desktop's auto-update setting is stored
+  under `%APPDATA%` (C:), and a WSL swap move needs `%USERPROFILE%\.wslconfig` (C:). Writing either breaks the D-drive rule (D-040).
+  Deleting the cached installer is a delete of a file the user did not ask me to remove.
+- **What the user can do:** in Docker Desktop, turn off automatic update downloads (Settings → Software updates) and delete
+  `%LOCALAPPDATA%\Temp\DockerDesktopUpdates` by hand. For the swap, the user can create `%USERPROFILE%\.wslconfig` with a
+  `[wsl2]` section and `swapfile=D:\\ccp-data\\wsl\\swap.vhdx` (a user decision, on C: as a text file).
+
+### Chaos rerun and debug results (2026-10-14, D-066 to D-070)
+- **Final run:** `.\scripts\kind-chaos.ps1` on a reset database, HOLD_ALERT_SECONDS=20 (the demo's own value, no override):
+  **exit 0, `failed checks: 0`, 426 s.** Load: seed 7, 6,000 shipments, 21,506 messages. Baseline on `validated`: 60,365 (earlier runs).
+  - Phase A (14:06–14:08 UTC), during the backlog: scale 1 → 3; SIGKILL a validator; inject 5 byte-identical re-sends; delete a processor;
+    restart `kafka-0` (ready again in 15 s); SIGKILL a processor; restart `mongo-0` (ready in 18 s); delete the monitor; scale 3 → 2 → 3.
+    Result: **RESULT: MATCH (16/16)** with `validator re-emits: 5` (produced 21,511 = 21,506 + 5; duplicates 912 = 907 + 5), and the
+    audit **5,997 shipments, 0 mismatched**.
+  - Phase B: SIGSTOP on a processor, restarted by its liveness probe **126 s** later (`Unhealthy` ×3, `failed liveness probe, will be
+    restarted`). Then **MATCH (16/16)** and the audit **0 of 5,997** again.
+  - Alerts: **2,203 raised, 605 open** = the 605 shipments still ON_HOLD. 1,598 lag-induced alerts closed themselves (D-069). Before
+    D-069 the same load gave 2,314 alerts that never closed (D-064).
+  - The validator SIGKILL itself caused no re-send in either run where it was tried (`validated` = manifest exactly, 20,120): the window
+    between its delivery and its commit is short. The 5 injected re-sends are what exercised the re-emit path on the cluster.
+- **Three bugs found while debugging, each fixed and covered before the final run:**
+  1. The verifier crashed on an API error during a MongoDB restart: fixed in `check()` (D-068), test red first.
+  2. It read `validated` once, while the validator was still routing the backlog (14,420 of 20,120), so the re-emit count came out
+     −5,700. Now the count is re-read on every poll (`verify(..., adjust)`), test red first.
+  3. It raised the expected duplicates but not the expected "produced" (stored + duplicates + rejected), so 5 re-emits could never match.
+     `with_reemits` raises both, test red first. Confirmed on the cluster's data before the final run (MATCH, `validator re-emits: 5`).
+  The chaos script had two bugs of its own, both found on the first runs: a piped `ConvertFrom-Json` array summed to 0, and an aborted run
+  kept its simulator Job producing. The sum is fixed (and checked on the live topic); the reset now waits for zero lag before dropping data.
+- **CI parity (local, the three jobs in `ci.yml`, current code):** lint and format clean, 166 unit tests passed; Compose integration
+  **40 passed** in 227 s (smoke demo included); image + `app` profile + `compose run simulator --seed 42` + `ccp.demo --verify-only` →
+  **RESULT: MATCH**. GitHub's own run waits for the user's push.
 
 ### D-048 A message is clean, late, duplicate or rejected, never more than one (P4)
 - **Context:** TRD §11 lists the faults but not how they combine. Stacking faults on one message would make the expected counts hard to read.

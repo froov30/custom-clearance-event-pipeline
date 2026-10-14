@@ -33,12 +33,22 @@
 - [x] **P9** `python -m ccp.demo` verified summary, smoke test, README v1 (MATCH, exit 0; 38 integration pass; see DECISIONS P9 results)
   - [x] **HARD CHECKPOINT 2 approved** (user, 2026-10-14)
 - [x] **P10** Slim image (268 MB), Compose `app` profile (containerised demo MATCH), CI workflow written (see DECISIONS P10 results)
-  - [ ] **CI green after the user pushes** (the workflow has not run yet). **Release 1 is done when this is ticked.**
+  - [x] **CI green after the user pushes** (run 38542228617 on `c48a0bf`: lint-and-unit, integration 39 passed, image + demo MATCH). **Release 1 done.**
 
 ## Release 2
 - [x] **P11** kind manifests, topic Job, probes, ConfigMap/Secret, processor ×3, rebalance recorded, demo on kind (see DECISIONS "P11 results")
   - [x] Prepared without a cluster: manifests, `ccp.common.groups` (+ test), rebalance logging (+ test), `deploy/k8s/README.md` (D-060)
   - [x] kind v0.33.0 downloaded with the user's approval (2026-10-14), SHA-256 matched the published file
   - [x] Cluster run: all pods Running, topics Job complete, demo on kind `RESULT: MATCH`, processor ×3 rebalance recorded, node memory recorded; bug found and fixed on the way (D-061)
+  - [x] Follow-ups requested at checkpoint 3: Kafka log on a PVC (D-062), A13 under load + pod kills + liveness restart + broker restart via `scripts/kind-chaos.ps1` (D-063, exit 0), `kind load` root cause (D-062); found and handled on the way: lag-induced hold alerts (D-064, documented) and a manifest bug for shipments with no valid event (D-065, fixed)
+  - [x] Debug of the eight open issues (DECISIONS "Chaos rerun and debug results", D-066 to D-070):
+    - [x] 1. Lag-induced false alerts: alerts now close when their hold ends; open alerts = holds under chaos at a 20 s threshold (D-069). The raised count still includes them (the page itself is not fixed; watermark is an add-on)
+    - [x] 2. Alerts never retracted: `resolved_at`, `open_alerts` in `/stats` (D-069)
+    - [x] 3. Validator re-sends inflate duplicates: the count is right; the demo now accounts for re-emits, proven with 5 injected re-sends on kind (D-067)
+    - [x] 4. Broker restart under load: MATCH and 0 stale statuses (D-068)
+    - [x] 5. MongoDB restart on kind under load: MATCH and 0 stale statuses; verifier no longer crashes on an API error (D-068)
+    - [x] 6. CI on the new code: all three `ci.yml` jobs pass locally; GitHub's run needs the user's push
+    - [x] 7. httpx deprecation warning: `httpx2` 2.13.1 in the dev extras; test red first (D-066)
+    - [ ] 8. Docker Desktop writes to C:: not fixable without writing to C: (D-070); user actions listed there
   - [ ] **HARD CHECKPOINT 3 approved** (waiting for the user; P12 starts only after this)
 - [ ] **P12** README polish, Known limits, resume-claim → evidence table

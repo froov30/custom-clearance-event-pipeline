@@ -7,9 +7,10 @@ An event-driven pipeline that works out each shipment's current customs clearanc
 It tolerates duplicate, late, out-of-order, malformed and illegal events, sends unprocessable ones to a dead-letter topic
 with a reason code, alerts on shipments held too long, and serves everything through a read-only API.
 
-**Status:** Release 1 (P0–P10) is built and verified locally, including every service running as a container. The GitHub
-Actions workflow is written but has **not run yet** (it runs on the first push). Kubernetes is **planned** (see [Planned](#planned)).
-Progress: [docs/TASKS.md](docs/TASKS.md).
+**Status:** Release 1 (P0–P10) is built and verified, including every service running as a container; CI (lint and unit,
+the Compose integration suite, the containerised demo) passed on its first run. P11 runs it on Kubernetes (kind): the demo
+matches there, the processor rebalances across 3 replicas, and a chaos run with pod kills, a liveness restart and a broker
+restart keeps every shipment correct ([deploy/k8s/README.md](deploy/k8s/README.md)). Progress: [docs/TASKS.md](docs/TASKS.md).
 
 ## How it works
 
@@ -115,12 +116,13 @@ Use a fresh stack for `--verify-only` (`down` first): it counts everything in th
 
 Listed in [TRD §17](docs/TRD.md#17-known-limits). The main ones: source clock skew is not corrected; the same logical event re-sent
 with a new `event_id` is not detected; single broker and single MongoDB node (no high availability); the API has no authentication;
-each event re-reads its shipment's history (measured: 6 ms per event at 10 events, 59 ms at 5,000).
+each event re-reads its shipment's history (measured: 6 ms per event at 10 events, 59 ms at 5,000); hold alerts use the
+monitor's wall clock, so processing lag above `HOLD_ALERT_SECONDS` still raises an alert for a hold that was already cleared.
+That alert closes itself once the clearing event is processed (`resolved_at`, D-069), so the open alerts are right, but the
+raised count and anyone paged for it are not (measured under load on kind, D-064).
 
 ## Planned
 
-Not built yet (Release 2, P11–P12): Kubernetes manifests on kind with the processor scaled to 3 replicas, and the final polish.
-CI is written but unproven until it runs. Add-ons are listed in
-[IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md).
+Not built yet: the final polish (P12). Add-ons are listed in [IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md).
 
 Design docs: [PRD](docs/PRD.md) · [TRD](docs/TRD.md) · [Architecture](docs/ARCHITECTURE.md) · [Plan](docs/IMPLEMENTATION_PLAN.md) · [Decisions](docs/DECISIONS.md)

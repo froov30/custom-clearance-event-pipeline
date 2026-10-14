@@ -193,17 +193,20 @@ replicas can be active.
   `expected_duplicates`, `rejected_by_reason`, `state_counts`, `anomalies_total`, `expected_alerts`. To build it, the simulator runs the
   **same pure fold** over the events that will pass validation. This reuse is acknowledged in PRD §8.
 - **Timing constraints** (enforced by the CLI at startup): `late_delay < HOLD_ALERT_SECONDS` and the hold-to-clear
-  gap `< HOLD_ALERT_SECONDS`, so `expected_alerts` = the number of shipments whose final state is ON_HOLD.
-  Defaults: `--step-delay 1` s (jitter up to 0.5 s), `--late-delay 3` s, `HOLD_ALERT_SECONDS=20`. That leaves a margin of at least 15 s, so
-  a shipment that is held and then cleared can never alert. The demo waits `HOLD_ALERT_SECONDS + 2 × MONITOR_SCAN_SECONDS` after the last
-  event before it verifies alerts. `rejected_by_reason` always lists all four codes, with `PROCESSING_ERROR: 0`.
+  gap `< HOLD_ALERT_SECONDS`, so `expected_alerts` = the number of shipments whose final state is ON_HOLD, and the demo compares
+  it with the **open** alerts (`resolved_at` null), which is what the monitor leaves open once processing has caught up (D-069).
+  Defaults: `--step-delay 1` s (jitter up to 0.5 s), `--late-delay 3` s, `HOLD_ALERT_SECONDS=20`. Under heavy backlog a held-then-cleared
+  shipment can raise an alert for a while, and it closes once its clearing event is processed (§17, D-064, D-069). The demo waits
+  `HOLD_ALERT_SECONDS + 2 × MONITOR_SCAN_SECONDS` after the last event before it re-checks alerts. `rejected_by_reason` always lists
+  all four codes, with `PROCESSING_ERROR: 0`. Validator re-emits (D-067) are added to the expected duplicates and reported on their own line.
 
 ## 12. Monitor
 
 There is one process with one loop: poll the DLQ consumer with a 1 s timeout, and every `MONITOR_SCAN_SECONDS` run the hold
 scan `shipment_status.find({state:"ON_HOLD", state_since:{$lt: now - HOLD_ALERT_SECONDS}})`, inserting one
-alert per result. The unique index makes repeated inserts no-ops (D-028). The DLQ sink upserts each record into `rejections`,
-then commits.
+alert per result. The unique index makes repeated inserts no-ops (D-028). The same scan then closes open alerts whose hold has ended:
+the shipment is no longer ON_HOLD, has no status, or a later event moved its `state_since` (D-069). A closed alert keeps its record and
+gets `resolved_at`; it is never re-raised. The DLQ sink upserts each record into `rejections`, then commits.
 
 ## 13. API contract (FastAPI; Swagger at `/docs`)
 
@@ -216,7 +219,7 @@ then commits.
 | `GET /anomalies?limit=&offset=` | Shipments with `anomaly_count > 0` |
 | `GET /alerts?limit=&offset=` | Alerts, newest first |
 | `GET /rejections/summary` | `{reason: count}` |
-| `GET /stats` | `events_stored`, `duplicates_dropped`, `rejected_total`, `state_counts`, `anomalies_total`, `alerts_total` |
+| `GET /stats` | `events_stored`, `duplicates_dropped`, `rejected_total`, `state_counts`, `anomalies_total`, `alerts_total` (raised, including closed), `open_alerts` (not yet closed) |
 
 Pagination: `limit` defaults to 50 with a **maximum of 200** (values above that get a 422). `offset` is ≥ 0. List responses are
 `{"items":[…],"limit":n,"offset":n,"total":n}`. Shortcut: offset pagination gets slow on deep pages,
@@ -279,11 +282,17 @@ uv, pip, temp, Docker CLI and kube locations to `D:\ccp-data\`, and the services
   26.4 ms at 1,000, 59.2 ms at 5,000. Customs lifecycles have under 10 events, so this is fine; the upgrade for long
   histories is an incremental fold when the new event sorts last (D-055).
 - A single Kafka broker with RF=1 and a single MongoDB node give no high availability. Without MongoDB transactions, the two writes are not atomic, and the recompute-on-duplicate step heals this.
-- `duplicates_dropped` counts duplicates on the `validated` topic, so a validator crash that re-emits an event adds to it
-  (processor crashes and redeliveries no longer do, D-051).
-- Alerts are keyed by `(shipment_id, state_since)`. A late event that changes `state_since` can raise a second alert for the same
-  hold, and alerts are never retracted.
-- The monitor compares event time against its own wall clock.
+- `duplicates_dropped` counts every message whose event is already stored, so a validator crash that re-sends an event counts too
+  (processor crashes and redeliveries do not, D-051). The demo accounts for those re-sends (`validated − stored`, D-067), so a
+  validator kill is verified, not excluded.
+- Alerts are keyed by `(shipment_id, state_since)`. A late event that changes `state_since` leaves the old alert open until the scan
+  closes it (D-069), and the new hold can raise its own alert. Closing does not delete: the history of raised alerts is kept.
+- The monitor compares event time against its own wall clock, so processing lag reads as hold time. A hold that was cleared but
+  whose `CLEARED` event is still in the backlog raises an alert once lag exceeds `HOLD_ALERT_SECONDS` minus the hold's real length,
+  and that alert closes only after the clearing event is processed (D-069). Measured on kind (D-064): with 21,506 messages and chaos the
+  lag reached 139 s (average 85 s), and a 20 s threshold raised 2,314 alerts for 605 holds. The closing fixes the stored state, not the
+  page: anyone watching `alerts_total` or a live alert feed still sees the false ones. The real fix is an event-time watermark (add-on).
+  Keep the threshold above worst-case lag (a SIGKILLed consumer alone stalls its partitions for the 45 s session timeout).
 - A container ID that changes within a shipment is not detected; the first one in fold order wins.
 - Reference data is static and requires a restart to change. Offset pagination is slow on deep pages. The API has no authentication.
 - Kafka UI exists in Compose only.
@@ -305,5 +314,5 @@ uv, pip, temp, Docker CLI and kube locations to `D:\ccp-data\`, and the services
 | A9 | Recompute-per-event is fast enough at demo scale. **Verified (P6):** 6.2 ms per event at 10 events per shipment (D-055). | P6, P9 |
 | A10 | In a clean run, the fold-based expected values equal the pipeline's output | P9 |
 | A11 | SIGTERM reaches the Python process when it is PID 1 (exec-form CMD) | P10 |
-| A12 | A GitHub-hosted runner can run the Compose smoke test within a reasonable time | P10 |
-| A13 | The eager rebalance with finish-in-flight, plus the `event_count` guard, means no stale status survives a scale-out. **Partly verified (P11):** after scaling 3 → 1 → 3 the demo still matched (16/16), but the rebalances ran on an idle topic, not under load. | P11 |
+| A12 | A GitHub-hosted runner can run the Compose smoke test within a reasonable time. **Verified:** CI run 38542228617 passed on its first push in 4 min 28 s (integration job 4 min 0 s, 39 tests; image job with demo MATCH 2 min 9 s). | P10 |
+| A13 | The eager rebalance with finish-in-flight, plus the `event_count` guard, means no stale status survives a scale-out. **Verified (P11, D-063):** under a 21,506-message load with scaling 1 → 3 → 2 → 3, a graceful and a SIGKILLed processor, a liveness restart and a broker restart, the per-shipment audit found 0 stale statuses in 5,997 shipments and the demo matched 16/16. | P11 |
