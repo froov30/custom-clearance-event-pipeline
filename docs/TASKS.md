@@ -1,7 +1,7 @@
 # Tasks (resume point for any session)
 
 > Synthetic-data project. The phase details are in IMPLEMENTATION_PLAN.md. Tick an item only after its acceptance check has been run and its output shown.
-> **Current status:** P0 to P11 done and checked. Waiting for the user's approval of hard checkpoint 3 before P12.
+> **Current status:** P0 to P12 done and checked; Release 1 and Release 2 complete. Open: item 8 below (user actions, D-070). Add-ons only on request.
 > **Hard rule (D-040):** nothing is written to C:. Repo on D:, all other data under `D:\ccp-data\`. Source `scripts/dev-env.ps1` in every shell.
 
 ## Stage 1: Planning
@@ -14,7 +14,7 @@
 - [x] Cross-doc consistency pass
 - [x] Gate 1 risks resolved: D-031 accepted (`PROCESSING_ERROR`), resume bullets reworded (D-038), RAM budget (D-039),
       D:-only storage (D-040), uv Python 3.11 (D-041), CI mirrors local (D-042), all tags and versions verified (D-033)
-- [ ] **User action:** move the Docker Desktop disk image to `D:\ccp-data\docker`, then start Docker Desktop
+- [x] **User action:** move the Docker Desktop disk image to `D:\ccp-data\docker`, then start Docker Desktop (measured there, D-070)
 - [x] "start build" (2026-10-11)
 
 ## Release 1
@@ -50,5 +50,9 @@
     - [x] 6. CI on the new code: all three `ci.yml` jobs pass locally; GitHub's run needs the user's push
     - [x] 7. httpx deprecation warning: `httpx2` 2.13.1 in the dev extras; test red first (D-066)
     - [ ] 8. Docker Desktop writes to C:: not fixable without writing to C: (D-070); user actions listed there
-  - [ ] **HARD CHECKPOINT 3 approved** (waiting for the user; P12 starts only after this)
-- [ ] **P12** README polish, Known limits, resume-claim → evidence table
+  - [x] GitHub CI green on the debug-round code (run 38581772404 on `7f107cf`: 166 unit, 40 integration, image + demo MATCH)
+  - [x] **HARD CHECKPOINT 3 approved** (user, 2026-10-14)
+- [x] **P12** README polish, Known limits, resume-claim → evidence table (DECISIONS D-071, "P12 results"). **Release 2 done.**
+  - [x] README: 3 Mermaid diagrams (rendered without errors), Compose and kind run steps, verified-claims table, Known limits, Add-ons
+  - [x] Resume wording frozen with a per-phrase evidence map (IMPLEMENTATION_PLAN.md); the original bullet 1 flagged for removal
+  - [x] Docs synced (ARCHITECTURE §7–8, the stale add-on removed); demo re-run on a fresh stack: MATCH, exit 0

@@ -128,11 +128,11 @@ flowchart TB
   SJ --> KS
 ```
 
-- The cluster is kind v0.33.0 with node `kindest/node:v1.36.4` (digest pinned in P11), single node. The image is built locally and loaded with
-  `kind load docker-image`. A pinned tag (not `latest`) means `IfNotPresent` is used. `kind.exe` and the kubeconfig live in `D:\ccp-data` (D-040).
+- The cluster is kind v0.33.0 with node `kindest/node:v1.36.4` (digest pinned in P11), single node. The `ccp` image is built locally and
+  loaded with `kind load docker-image`; Kafka and MongoDB are pulled by the kubelet (D-062). A pinned tag (not `latest`) means `IfNotPresent` is used. `kind.exe` and the kubeconfig live in `D:\ccp-data` (D-040).
 - **Compose is stopped before kind starts.** The two never run together on this 7.8 GB machine (D-039). Every pod sets the same memory limits as in Compose.
 - **Probes:** for `api`, liveness and readiness use `httpGet /health`. The consumers use an **exec** liveness probe that fails if
-  `/tmp/<service>.heartbeat` is older than 30 s. There is no readiness probe for consumers because they receive no traffic.
+  `/tmp/<service>.heartbeat` is older than 60 s (D-059). There is no readiness probe for consumers because they receive no traffic.
 - **Config:** non-secret env vars come from the ConfigMap. `MONGO_USER`/`MONGO_PASSWORD` come from the Secret, which the mongo
   StatefulSet also uses for its root user.
 - Storage uses kind's default `standard` StorageClass (local-path). Single replicas only, so there is no HA (TRD §17).
@@ -142,13 +142,14 @@ flowchart TB
 
 The `validated` topic has 6 partitions, so up to 6 processor replicas share it within the group `ccp-processor`.
 Running `kubectl scale deploy/processor --replicas=3` triggers a rebalance: each replica logs its `on_assign`/`on_revoke`
-partitions, and `python -m ccp.common.groups ccp-processor` (an AdminClient `describe_consumer_groups` call, run as a one-off pod
-from the `ccp` image) shows about 2 partitions per member. The native Kafka image ships without the `kafka-*.sh` tools (D-039). Correctness holds through the rebalance because:
+partitions, and `python -m ccp.common.groups ccp-processor` (an AdminClient `describe_consumer_groups` call, run with `kubectl exec`
+in the api pod, because the broker is in-cluster only) shows about 2 partitions per member. The native Kafka image ships without the `kafka-*.sh` tools (D-039). Correctness holds through the rebalance because:
 1. Each replica finishes its in-flight message before it gives up partitions.
 2. Commits happen only after the writes succeed, so a revoked uncommitted message is redelivered and handled idempotently.
 3. The `event_count`-guarded upsert prevents a stale recompute from overwriting a newer one (D-027).
 
-The evidence (logs and `--describe` output) is recorded at Hard Checkpoint 3. Nothing is claimed before then.
+Recorded at Hard Checkpoint 3 (DECISIONS "P11 results"): 3 members with partitions `[0,1]`, `[2,3]`, `[4,5]`, and the revoke and
+assign logs for 3 → 1 → 3. Under load (D-063, "Chaos rerun"), scaling 1 → 3 → 2 → 3 with kills left 0 stale statuses in 5,997 shipments.
 
 ## 9. Why Kubernetes fits here
 

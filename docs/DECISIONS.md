@@ -681,6 +681,28 @@ each (159 s)**. Unit suite: 131 passed. Lint and format clean.
   **40 passed** in 227 s (smoke demo included); image + `app` profile + `compose run simulator --seed 42` + `ccp.demo --verify-only` →
   **RESULT: MATCH**. GitHub's own run waits for the user's push.
 
+### D-071 Resume wording frozen, and where the evidence map lives (P12)
+- **Context:** D-038 left the final wording to P12, after the evidence existed. Hard Checkpoint 3 passed (user, 2026-10-14), so bullet 2
+  is no longer conditional.
+- **Choice:** the three bullets in IMPLEMENTATION_PLAN.md "Resume claims → evidence", each phrase with its artifact. Two changes from
+  the proposal: "immutable" became "append-only" (the code only inserts events, but MongoDB does not enforce it), and bullet 2 gained
+  the chaos result. The README carries the employer-facing "What is verified" table; the resume map stays in the plan, not the README.
+- **The user's original bullet 1 stays flagged** (no document-submission or clearance-status services exist). Bullets 2 and 3 are true
+  but vague; the rewrites name what was proven.
+
+### P12 results (2026-10-14)
+- README final: three Mermaid diagrams (pipeline, state machine, kind topology), Compose and kind run steps, the verified-claims table
+  with kind and chaos rows, Known limits (with measurements), Add-ons. ARCHITECTURE §7–8 synced (60 s heartbeat, image loading,
+  `groups` via `kubectl exec`, the recorded rebalance). The stale "Alert resolution" add-on was removed (built in D-069).
+- Every artifact in the evidence map was re-checked: the test names exist (grep), the manifest kinds are 4 Deployments, 2 StatefulSets,
+  3 Services and 2 Jobs, and no code updates or deletes `events`.
+- `python -m ccp.demo --seed 42` on a fresh Compose stack → **RESULT: MATCH, exit 0, 74 s**. The README's recorded output was replaced
+  with this run (its alerts row now reads "open hold alerts").
+- **GitHub CI on the debug-round code** (run 38581772404 on `7f107cf`): success in 4 min 30 s. lint-and-unit 166 passed; integration
+  40 passed in 205 s; image + containerised demo `RESULT: MATCH`.
+- Mermaid: the README's three blocks rendered to SVG with no syntax error in the in-app browser (Mermaid 11.4.1 from jsdelivr, a
+  throwaway page served from `D:\ccp-data\tmp` on localhost, deleted after). GitHub's own renderer is only seen after the push.
+
 ### D-048 A message is clean, late, duplicate or rejected, never more than one (P4)
 - **Context:** TRD §11 lists the faults but not how they combine. Stacking faults on one message would make the expected counts hard to read.
 - **Choice:** A rejected message (malformed, bad container, unknown reference) is never also late or duplicated. A late or duplicate message is always a valid event. Illegal sequences are a shipment-level script change, so they produce anomalies in the fold, not a message label.

@@ -155,29 +155,53 @@
 | FR-17 Compose + kind, scalable processor | §7, ARCH §6–8 | P10, P11 |
 | FR-18 CI | §15 | P10 |
 
-## Resume claims → evidence (D-038; the wording is frozen only in P12)
+## Resume claims → evidence (D-038; wording frozen in P12, D-071)
 
-Your original bullets, checked against the design:
+Your original bullets, checked against what was built:
 
 | # | Original claim | Verdict |
 |---|---|---|
-| 1 | "decoupling document-submission and clearance-status services through Kafka" | **Inaccurate as worded.** No services have those names; they are split by pipeline stage. Reword it. |
-| 2 | "Docker … local Kubernetes cluster using Deployment and Service manifests" | True **only if Hard Checkpoint 3 passes**. Services exist for kafka, mongo and api (the consumers need none). |
-| 3 | "Persisted workflow events in MongoDB and validated asynchronous message-processing flows" | True after P6 and P9, but vague. The rewrite names what was actually proven. |
+| 1 | "decoupling document-submission and clearance-status services through Kafka producer/consumer communication" | **Inaccurate as worded. Cut or replace.** No services have those names; they are split by pipeline stage (simulator, validator, processor, monitor, api). Document submission exists only as event types (`DECLARATION_FILED`, `DOCUMENTS_VERIFIED`). |
+| 2 | "Containerized independently deployable services with Docker … local Kubernetes cluster using Deployment and Service manifests" | **True** (Hard Checkpoint 3 passed). Four Deployments; Services exist for kafka, mongo and api (the consumers need none). "Isolated service execution" is vague: each service is its own pod with its own memory limit, from one shared image. |
+| 3 | "Persisted workflow events in MongoDB and validated asynchronous message-processing flows to maintain service state across the document-submission and clearance lifecycle" | **True but vague.** The state kept is each **shipment's** clearance state, not service state. The rewrite names what was proven. |
 
-Proposed wording (every phrase maps to an artifact):
+Final wording. Every phrase maps to an artifact; each artifact was re-checked in P12:
 
 1. *Designed an event-driven microservices pipeline for a simulated customs-clearance workflow (synthetic data), decoupling ingestion,
    validation, state-derivation and alerting services through Kafka consumer groups, with a reason-coded dead-letter topic for invalid events.*
-   **Evidence:** P5 integration test (DLQ reasons), P9 demo summary (DLQ counts by reason match the expected values), ARCHITECTURE §1.
-2. *Containerized the services into a single slim Docker image and deployed them to a local Kubernetes (kind) cluster with Deployment,
-   StatefulSet and Service manifests, heartbeat liveness probes, and a processor scaled to 3 replicas through consumer-group rebalancing.*
-   **Evidence:** P10 image build and size, P11 `kubectl get pods`, the rebalance logs and the `ccp.common.groups` output. **Conditional on Hard Checkpoint 3.**
-3. *Built an immutable event log and a current-state view in MongoDB, deriving each shipment's state by replaying its events in event-time
-   order so that duplicate, late and out-of-order events self-heal; verified by replay, shuffled-order and crash-restart tests.*
-   **Evidence:** P2 permutation test, the P6 integration tests (a, b, c), and the P9 reconciliation `produced = stored + duplicates + rejected`.
 
-Not claimed anywhere: "exactly-once semantics", throughput numbers (none are measured), real-world data, or cloud deployment.
+   | Phrase | Evidence |
+   |---|---|
+   | five services, decoupled by topics and consumer groups | `src/ccp/{simulator,validator,processor,monitor,api}`, ARCHITECTURE §1 and §3 (groups `ccp-validator`, `ccp-processor`, `ccp-monitor-dlq`) |
+   | reason-coded dead-letter topic | `tests/test_validator_route.py::test_bad_events_go_to_dlq_with_their_reason`, `tests/integration/test_validator.py::test_routes_each_event_by_reason_and_stops_cleanly` |
+   | it works end to end | `python -m ccp.demo --seed 42`: DLQ counts by reason match the manifest, `RESULT: MATCH` (re-run in P12, 74 s, exit 0) |
+
+2. *Containerized the services into a single 268 MB Docker image and deployed them to a local Kubernetes (kind) cluster with Deployment,
+   StatefulSet and Service manifests and heartbeat liveness probes; scaled the processor to 3 replicas through consumer-group rebalancing,
+   and verified under chaos (pod kills, broker and database restarts) that every shipment's state stayed correct.*
+
+   | Phrase | Evidence |
+   |---|---|
+   | single 268 MB image | `Dockerfile`; DECISIONS "P10 results" (`docker image ls`) |
+   | Deployment, StatefulSet and Service manifests | `deploy/k8s/*.yaml`: 4 Deployments, 2 StatefulSets, 3 Services, 2 Jobs; DECISIONS "P11 results" (all pods Running, demo MATCH on kind) |
+   | heartbeat liveness probes | `src/ccp/common/probe.py`, `tests/test_probe.py`; on kind a SIGSTOPped processor was restarted by its probe 126 s later (DECISIONS "Chaos rerun") |
+   | 3 replicas, rebalancing | DECISIONS "P11 results": `python -m ccp.common.groups ccp-processor` shows 3 members with `[0,1]`, `[2,3]`, `[4,5]`, plus the revoke and assign logs |
+   | verified under chaos | `scripts/kind-chaos.ps1`, exit 0: 21,506 messages, SIGKILLs, Kafka and MongoDB restarts mid-backlog, scaling; 16/16 totals match and the audit finds 0 of 5,997 shipments wrong |
+
+3. *Built an append-only event log and a current-state view in MongoDB, deriving each shipment's state by replaying its events in
+   event-time order so that duplicate, late and out-of-order events self-heal; verified by replay, shuffled-order and crash-restart tests
+   in a GitHub Actions CI pipeline.*
+
+   | Phrase | Evidence |
+   |---|---|
+   | append-only event log | `src/ccp/processor/store.py`: events are only inserted (unique `event_id`); no code updates or deletes them (grep in P12). Append-only by code, not by database permissions |
+   | replaying in event-time order; out-of-order self-heals | `tests/test_fold.py::test_every_arrival_order_gives_same_result`, `::test_late_event_heals_anomaly` |
+   | replay, shuffled-order and crash-restart tests | `tests/integration/test_processor.py`: `test_redelivering_the_stream_changes_nothing`, `test_shuffled_arrival_orders_give_identical_final_states`, `test_killed_processor_heals_after_restart` |
+   | duplicates | the demo's reconciliation `produced = stored + duplicates + rejected` (69 = 62 + 1 + 6) |
+   | GitHub Actions CI | `.github/workflows/ci.yml`; latest run 38581772404 on `7f107cf` passed (166 unit, 40 integration, image + demo MATCH) |
+
+Not claimed anywhere: "exactly-once semantics", throughput numbers (none are measured), real-world data, high availability, or cloud deployment.
+If asked, the honest limits are in README "Known limits" (lag-induced alerts, at-least-once validator output, single broker and node).
 
 ## Add-on features (after the main project works)
 
@@ -191,6 +215,5 @@ Not built until requested. Each one gets a DECISIONS.md entry before it starts.
 - Cloud deployment (managed Kubernetes or a container platform), optionally against Cosmos DB's MongoDB API, only if Cosmos is wanted on the resume
 - A Helm chart for the k8s manifests
 - API auth and rate limiting
-- Event-time watermarking and clock-skew handling
-- Alert resolution: mark an alert resolved when its shipment leaves ON_HOLD, so a lag-induced alert (D-064) is visibly closed
+- Event-time watermarking and clock-skew handling (the fix for lag-induced alerts being raised at all; closing them was built in D-069)
 - Interview-prep notes written only from what is actually built
