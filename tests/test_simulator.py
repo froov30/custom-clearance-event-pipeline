@@ -140,7 +140,15 @@ def test_manifest_reconciles_and_alerts_match_final_on_hold_states():
     assert m["rejected_by_reason"]["PROCESSING_ERROR"] == 0
     assert m["expected_alerts"] == m["state_counts"]["ON_HOLD"]
     assert m["expected_alerts"] > 0
-    assert sum(m["state_counts"].values()) == len(plan.shipments)
+    # Only shipments with a stored event get a status; one with every message rejected has none.
+    assert sum(m["state_counts"].values()) == len({e["shipment_id"] for e in plan.events})
+
+
+def test_a_shipment_with_every_message_rejected_has_no_state():
+    # Seen on kind: 3 of 6,000 shipments had no valid event; the manifest counted them UNKNOWN.
+    plan = generate(1, cfg(malformed_rate=1.0), START, REF)
+    assert plan.events == []
+    assert sum(expect(plan)["state_counts"].values()) == 0
 
 
 def test_timing_constraints_are_enforced():

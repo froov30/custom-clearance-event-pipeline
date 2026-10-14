@@ -253,8 +253,10 @@ def expect(plan: Plan) -> dict[str, Any]:
         by_shipment.setdefault(e["shipment_id"], []).append(e)
     state_counts: Counter[str] = Counter({s.value: 0 for s in State})
     anomalies_total = 0
-    for sid in plan.shipments:
-        result = fold(by_shipment.get(sid, []))
+    # Only shipments with a stored event get a status document; one whose every message was
+    # rejected never reaches the processor, so it is not counted (not even as UNKNOWN).
+    for events in by_shipment.values():
+        result = fold(events)
         state_counts[result.state.value] += 1
         anomalies_total += len(result.anomalies)
     rejected: Counter[str] = Counter({code: 0 for code in DLQ_CODES})
