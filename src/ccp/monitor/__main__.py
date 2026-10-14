@@ -18,7 +18,7 @@ from ccp.common.kafka import (
 )
 from ccp.common.log import setup_logging
 from ccp.common.topics import DLQ
-from ccp.monitor.core import scan_holds, store_rejection
+from ccp.monitor.core import resolve_alerts, scan_holds, store_rejection
 
 GROUP = "ccp-monitor-dlq"
 log = logging.getLogger(__name__)
@@ -56,13 +56,16 @@ def main() -> None:
         if time.monotonic() - last_scan < cfg.monitor_scan_seconds:
             return
         last_scan = time.monotonic()
+        now = datetime.now(UTC)
         try:
-            new = scan_holds(db, datetime.now(UTC), cfg.hold_alert_seconds)
+            new = scan_holds(db, now, cfg.hold_alert_seconds)
+            closed = resolve_alerts(db, now)
         except mongo.TRANSIENT as e:
             raise Transient(f"MongoDB unavailable: {e}") from e
-        if new:
+        if new or closed:
             counts["alerts"] += new
-            log.info("alerts raised", extra={"fields": {"new": new}})
+            counts["resolved"] += closed
+            log.info("alerts scanned", extra={"fields": {"raised": new, "resolved": closed}})
 
     group = GROUP + cfg.group_suffix
     log.info("started", extra={"fields": {"group": group, "db": cfg.mongo_db}})

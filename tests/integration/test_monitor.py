@@ -16,7 +16,7 @@ from ccp.common import mongo
 from ccp.common.config import Config
 from ccp.common.kafka import producer
 from ccp.common.topics import DLQ
-from ccp.monitor.core import scan_holds, store_rejection
+from ccp.monitor.core import resolve_alerts, scan_holds, store_rejection
 
 pytestmark = pytest.mark.integration
 ROOT = Path(__file__).parents[2]
@@ -76,8 +76,21 @@ def test_only_holds_older_than_the_threshold_alert_and_only_once(db):
         "state_since": NOW - timedelta(seconds=30),
         "held_seconds": 30,
         "raised_at": NOW,
+        "resolved_at": None,
     }
     assert db.alerts.count_documents({}) == 1
+
+
+def test_an_alert_closes_once_its_hold_ends_and_stays_closed(db):
+    db.shipment_status.insert_one(status("S-1", "ON_HOLD", NOW - timedelta(seconds=30)))
+    scan_holds(db, NOW, 20)
+    assert resolve_alerts(db, NOW) == 0  # the hold is still open
+    db.shipment_status.update_one({"_id": "S-1"}, {"$set": {"state": "CLEARED"}})
+    later = NOW + timedelta(seconds=5)
+    assert resolve_alerts(db, later) == 1
+    assert db.alerts.find_one({"shipment_id": "S-1"})["resolved_at"] == later
+    assert resolve_alerts(db, later + timedelta(seconds=5)) == 0  # closed once, not again
+    assert scan_holds(db, later + timedelta(seconds=5), 20) == 0  # and never re-raised
 
 
 def test_a_new_hold_on_the_same_shipment_alerts_again(db):

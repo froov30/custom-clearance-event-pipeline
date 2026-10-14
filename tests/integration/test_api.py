@@ -80,8 +80,20 @@ def _seed(db):
     later = T + timedelta(seconds=5)
     db.alerts.insert_many(
         [
-            {"shipment_id": "S-1", "state_since": T, "held_seconds": 25, "raised_at": T},
-            {"shipment_id": "S-9", "state_since": T, "held_seconds": 40, "raised_at": later},
+            {
+                "shipment_id": "S-1",
+                "state_since": T,
+                "held_seconds": 25,
+                "raised_at": T,
+                "resolved_at": None,
+            },
+            {
+                "shipment_id": "S-9",
+                "state_since": T,
+                "held_seconds": 40,
+                "raised_at": later,
+                "resolved_at": later + timedelta(seconds=5),
+            },  # its hold ended: no longer open
         ]
     )
     db.rejections.insert_many(
@@ -151,10 +163,11 @@ def test_anomalies_lists_only_shipments_with_anomalies(api):
     assert body["total"] == 1
 
 
-def test_alerts_newest_first(api):
+def test_alerts_newest_first_and_resolved_ones_are_marked(api):
     body = api.get("/alerts").json()
     assert [a["shipment_id"] for a in body["items"]] == ["S-9", "S-1"]
     assert all("_id" not in a for a in body["items"])
+    assert [a["resolved_at"] is not None for a in body["items"]] == [True, False]
 
 
 def test_rejection_summary_lists_every_reason_code(api):
@@ -183,6 +196,7 @@ def test_stats(api):
         },
         "anomalies_total": 2,
         "alerts_total": 2,
+        "open_alerts": 1,
     }
 
 

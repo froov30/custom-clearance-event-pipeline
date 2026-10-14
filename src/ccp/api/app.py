@@ -123,6 +123,7 @@ def create_app(db: Database) -> FastAPI:
             "state_counts": {s.value: by_state.get(s.value, 0) for s in State},
             "anomalies_total": anomaly_sum[0]["n"] if anomaly_sum else 0,
             "alerts_total": db.alerts.count_documents({}),
+            "open_alerts": db.alerts.count_documents({"resolved_at": None}),
         }
 
     return app
