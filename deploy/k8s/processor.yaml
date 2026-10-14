@@ -1,0 +1,37 @@
+# Scale to show consumer-group rebalancing: kubectl -n ccp scale deploy/processor --replicas=3
+# (up to 6 replicas can be active: `validated` has 6 partitions).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: processor
+  namespace: ccp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: processor
+  template:
+    metadata:
+      labels:
+        app: processor
+    spec:
+      terminationGracePeriodSeconds: 30
+      enableServiceLinks: false
+      containers:
+        - name: processor
+          image: ccp:0.1.0
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "ccp.processor"]
+          envFrom:
+            - configMapRef: { name: ccp-config }
+            - secretRef: { name: ccp-mongo }
+          livenessProbe:
+            exec:
+              command: ["python", "-m", "ccp.common.probe", "processor"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: { memory: 96Mi, cpu: 50m }
+            limits: { memory: 192Mi }

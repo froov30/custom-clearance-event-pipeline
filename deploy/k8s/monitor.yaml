@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: monitor
+  namespace: ccp
+spec:
+  replicas: 1 # one scanner: alerts are idempotent, but there is no reason to run two
+  selector:
+    matchLabels:
+      app: monitor
+  template:
+    metadata:
+      labels:
+        app: monitor
+    spec:
+      terminationGracePeriodSeconds: 30
+      enableServiceLinks: false
+      containers:
+        - name: monitor
+          image: ccp:0.1.0
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "ccp.monitor"]
+          envFrom:
+            - configMapRef: { name: ccp-config }
+            - secretRef: { name: ccp-mongo }
+          livenessProbe:
+            exec:
+              command: ["python", "-m", "ccp.common.probe", "monitor"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: { memory: 96Mi, cpu: 50m }
+            limits: { memory: 192Mi }

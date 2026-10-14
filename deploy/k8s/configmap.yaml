@@ -1,0 +1,15 @@
+# Non-secret settings (TRD §14). Credentials live in the Secret `ccp-mongo`, created from .env, never committed
+# (see deploy/k8s/README.md).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ccp-config
+  namespace: ccp
+data:
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092 # single in-cluster listener (ARCHITECTURE §5)
+  MONGO_HOST: mongo
+  MONGO_PORT: "27017"
+  MONGO_DB: ccp
+  HOLD_ALERT_SECONDS: "20"
+  MONITOR_SCAN_SECONDS: "5"
+  LOG_LEVEL: INFO

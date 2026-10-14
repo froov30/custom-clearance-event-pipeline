@@ -1,0 +1,21 @@
+# Creates the three topics (idempotent; waits up to 60 s per try for the broker, retried by the Job).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: topics-init
+  namespace: ccp
+spec:
+  backoffLimit: 6
+  template:
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      containers:
+        - name: topics
+          image: ccp:0.1.0
+          imagePullPolicy: IfNotPresent # loaded with `kind load docker-image`
+          command: ["python", "-m", "ccp.common.topics"]
+          envFrom:
+            - configMapRef: { name: ccp-config }
+          resources:
+            limits: { memory: 192Mi }

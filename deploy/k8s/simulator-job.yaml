@@ -1,0 +1,22 @@
+# Produces the seed-42 run once. backoffLimit 0: a retry would produce the events twice and break the
+# exact match that `python -m ccp.demo --seed 42 --verify-only` checks.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: simulator
+  namespace: ccp
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      enableServiceLinks: false
+      containers:
+        - name: simulator
+          image: ccp:0.1.0
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "ccp.simulator", "--seed", "42"]
+          envFrom:
+            - configMapRef: { name: ccp-config }
+          resources:
+            limits: { memory: 192Mi }

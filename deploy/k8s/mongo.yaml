@@ -1,0 +1,67 @@
+# Single-node MongoDB with auth; the root user comes from the Secret `ccp-mongo` on first start.
+# The PVC uses kind's default local-path StorageClass, inside the Docker disk image on D: (A15).
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongo
+  namespace: ccp
+spec:
+  selector:
+    app: mongo
+  ports:
+    - name: mongo
+      port: 27017
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongo
+  namespace: ccp
+spec:
+  serviceName: mongo
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mongo
+  template:
+    metadata:
+      labels:
+        app: mongo
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: mongo
+          image: mongo:8.0.32
+          args: ["--wiredTigerCacheSizeGB", "0.25"]
+          ports:
+            - containerPort: 27017
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom: { secretKeyRef: { name: ccp-mongo, key: MONGO_USER } }
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: ccp-mongo, key: MONGO_PASSWORD } }
+          readinessProbe:
+            exec:
+              command: ["mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 10
+          resources:
+            requests: { memory: 256Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            - name: data
+              mountPath: /data/db
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
