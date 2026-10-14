@@ -1,0 +1,76 @@
+# CI runs exactly the commands used locally (D-042). Synthetic data only.
+# Action tags verified against the GitHub releases API on 2026-10-14 (checkout v7.0.1, setup-python v7.0.0).
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  COMPOSE: docker compose --env-file .env -f deploy/compose/docker-compose.yml
+
+jobs:
+  lint-and-unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: pytest -q
+
+  integration:
+    needs: lint-and-unit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CCP_INTEGRATION: "1"
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]"
+      - name: Throwaway .env (the password never leaves the runner)
+        run: |
+          cp .env.example .env
+          sed -i "s/^MONGO_PASSWORD=.*/MONGO_PASSWORD=$(openssl rand -hex 16)/" .env
+      - name: Start Kafka and MongoDB
+        run: $COMPOSE up -d --wait
+      - name: Create topics, then run the integration suite (includes the smoke demo)
+        run: |
+          set -a; . ./.env; set +a
+          python -m ccp.common.topics
+          pytest -q -m integration
+      - name: Container logs on failure
+        if: failure()
+        run: $COMPOSE logs --tail 200
+
+  image:
+    needs: lint-and-unit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]"
+      - name: Throwaway .env
+        run: |
+          cp .env.example .env
+          sed -i "s/^MONGO_PASSWORD=.*/MONGO_PASSWORD=$(openssl rand -hex 16)/" .env
+      - run: docker build -t ccp:0.1.0 .
+      - name: Every service as a container
+        run: $COMPOSE --profile app up -d --wait
+      - run: $COMPOSE run --rm simulator --seed 42
+      - name: Verify the containerised pipeline against the manifest
+        run: |
+          set -a; . ./.env; set +a
+          python -m ccp.demo --seed 42 --verify-only
+      - name: Container logs on failure
+        if: failure()
+        run: $COMPOSE --profile app logs --tail 200
