@@ -92,12 +92,15 @@ cluster talks to Kafka there: the demo runs the simulator as an in-cluster Job a
 
 | Service | Image (verified 2026-10-11, D-033) | Host port | Memory limit (D-039) | Notes |
 |---|---|---|---|---|
-| `kafka` | `apache/kafka-native:4.3.1` (fallback `apache/kafka:4.3.1`) | 9092 | 512 MiB | KRaft combined mode, healthcheck, auto-create off |
+| `kafka` | `apache/kafka-native:4.3.1` (fallback `apache/kafka:4.3.1`) | 9092 | 512 MiB | KRaft combined mode, `nc -z` healthcheck, auto-create off, no volume (D-045) |
 | `mongo` | `mongo:8.0.32` | 27017 | 512 MiB | root user from `.env`, `--wiredTigerCacheSizeGB 0.25`, named volume |
 | `kafka-ui` | `kafbat/kafka-ui:v1.5.0` | 8080 | 512 MiB | `profiles: [ui]` (on demand only); points at `kafka:19092` |
 | `topics-init` | `ccp` image (P10) | — | 192 MiB | one-shot, `depends_on: kafka healthy` |
 | `validator`, `processor`, `monitor` | `ccp` image (P10) | — | 192 MiB each | `profiles: [app]`, heartbeat healthcheck |
-| `api` | `ccp` image (P10) | 8000 | 256 MiB | `profiles: [app]` |
+| `api` | `ccp` image (P10) | 8000 | 256 MiB | `profiles: [app]`, HTTP healthcheck on `/health` |
+| `simulator` | `ccp` image (P10) | — | 192 MiB | `profiles: [tools]`; one-off: `$C run --rm simulator --seed 42` |
+
+The consumers' healthcheck is `python -m ccp.common.probe <service>`: healthy if the heartbeat file is under 60 s old (D-053, D-059).
 
 In dev mode (P3–P9), `docker compose up -d` starts only Kafka and MongoDB. Add `--profile ui` to inspect topics. The services run
 on the host from the venv (on D:, D-040). From P10, `docker compose --profile app up -d` starts everything. The simulator runs with

@@ -91,11 +91,11 @@ recomputing it after a late event can remove anomalies that existed before (FR-7
 
 | Collection | Document | Indexes |
 |---|---|---|
-| `events` | The validated envelope plus `ingested_at` | unique `event_id`; `{shipment_id:1, occurred_at:1}` |
+| `events` | The validated envelope plus `ingested_at` and `source_message` (`{topic, partition, offset}` of the Kafka message that first carried it) | unique `event_id`; `{shipment_id:1, occurred_at:1}` |
 | `shipment_status` | `_id`=shipment_id, `container_id`, `state`, `state_since`, `event_count`, `anomalies[]`, `anomaly_count`, `updated_at` | `{state:1, state_since:1}`; `{anomaly_count:1}` |
 | `alerts` | `shipment_id`, `state_since`, `held_seconds`, `raised_at` | unique `{shipment_id:1, state_since:1}` |
 | `rejections` | `_id`=`"{topic}:{partition}:{offset}"`, `reason`, `detail`, `raw`, `failed_at` | `{reason:1}` |
-| `stats` | `_id`=`"processor"`, `duplicates_dropped` | (by `_id`) |
+| `duplicates` | `_id`=`"{topic}:{partition}:{offset}"` of a message whose `event_id` was already stored from **another** message; `event_id`, `shipment_id`, `seen_at`. `duplicates_dropped` is this collection's count (D-051). | (by `_id`) |
 
 `events` is append-only: the code only ever inserts. `container_id` on the status document comes from the
 first event in fold order (known limit, §17).
@@ -123,18 +123,24 @@ replicas can be active.
 - **Shutdown:** SIGTERM and SIGINT set a flag. The current message finishes, then `consumer.close()` runs (it commits nothing extra
   and leaves the group cleanly). SIGINT is handled because the dev host is Windows.
 - **Processor per message:**
-  1. Insert into `events`. On `DuplicateKeyError`, mark it as a duplicate and **continue**.
+  1. Insert into `events`, recording the message's `(topic, partition, offset)` as `source_message`. On `DuplicateKeyError`,
+     compare: the **same** message again is a redelivery (not a duplicate); a **different** message is a true duplicate (D-051). **Continue** either way.
   2. Load all of the shipment's events (using the `shipment_id+occurred_at` index), fold, and upsert `shipment_status`
      **guarded by `event_count`**: `update_one({_id, event_count: {$lte: n}}, {$set: …}, upsert=True)`.
      If a newer document exists, the filter misses, the upsert hits `DuplicateKeyError`, and the stale write is
-     dropped (D-027). This protects against an overlapping recompute during a rebalance.
-  3. If it was a duplicate, `$inc stats.duplicates_dropped`.
+     dropped (D-027). Then **re-count** the shipment's events: if the count is no longer `n`, a concurrent insert was
+     missed by the read (the guard cannot see that, because the counts can tie), so fold again, up to 5 times (D-052).
+  3. If it was a true duplicate, upsert `duplicates` by the message's coordinates (idempotent).
   4. Commit the offset.
 - **Healing:** a crash between steps 1 and 2 leaves the event stored but the status stale. On redelivery, step 1
-  raises `DuplicateKeyError`, and step 2 still recomputes, so the status heals (D-017). As a result,
-  `duplicates_dropped` **includes crash-replay duplicates**, and in a clean run it equals the injected
-  duplicates exactly. The counter is incremented after the status write and before the commit, so a crash between
-  steps 3 and 4 can over-count it by one. This is accepted and documented.
+  raises `DuplicateKeyError`, and step 2 still recomputes, so the status heals (D-017). Because the redelivery comes from
+  the same message, it is **not** counted, and step 3 is idempotent, so `duplicates_dropped` is exact across processor
+  crashes and replays (verified: kill-and-restart test). It still includes duplicates that reach `validated` as separate
+  messages, e.g. a validator that crashed after producing and re-emitted on restart.
+- **MongoDB timeouts:** the client uses 5 s server-selection, connect and socket timeouts, so a hung MongoDB raises
+  `AutoReconnect` (retried with backoff, heartbeat kept fresh) instead of blocking forever. Measured worst-case heartbeat gap
+  during a MongoDB pause: 14.7 s (three stacked timeouts), so the liveness probe threshold must be at least 45 s (D-053).
+  At start-up the processor waits for MongoDB the same way instead of exiting.
 - **Net effect:** at-least-once delivery plus idempotent, deterministic processing gives an exactly-once
   *effect* on stored state. The project does not use Kafka transactions and does not claim exactly-once semantics (D-019).
 
@@ -145,7 +151,7 @@ replicas can be active.
 | Non-JSON, missing field, wrong type, unknown type or version | Pydantic in the validator | DLQ `SCHEMA_INVALID`, commit |
 | Bad container format or check digit | ISO 6346 check | DLQ `CONTAINER_ID_INVALID`, commit |
 | Port or HS code not in the reference data | Set lookup | DLQ `UNKNOWN_REFERENCE_DATA`, commit |
-| Duplicate `event_id` | Unique index → `DuplicateKeyError` | Recompute, `duplicates_dropped += 1`, commit. Not sent to the DLQ. |
+| Duplicate `event_id` | Unique index → `DuplicateKeyError` | Recompute; record in `duplicates` only if it came in a different message (D-051); commit. Not sent to the DLQ. |
 | Late or out-of-order event | — (handled by design) | The fold sorts by event time, so the state becomes correct once the event arrives and any interim anomaly heals |
 | Illegal sequence or event after a terminal state | Fold | `ILLEGAL_TRANSITION` anomaly, state unchanged by that step. Not sent to the DLQ. |
 | MongoDB unavailable | `pymongo.errors.AutoReconnect` / `ServerSelectionTimeoutError` | Retry with backoff, no commit, no DLQ |
@@ -229,6 +235,8 @@ and the upgrade is keyset pagination on `(state_since, _id)`.
 | `MONITOR_SCAN_SECONDS` | `5` | monitor |
 | `HEARTBEAT_DIR` | `.run` (host dev, inside the repo on D:); the image sets `/tmp` | validator, processor, monitor. Each service writes `<dir>/<service>.heartbeat`, so the host services never share a file. |
 | `LOG_LEVEL` | `INFO` | all |
+| `API_HOST` / `API_PORT` | `127.0.0.1` / `8000` | api. Containers set `API_HOST=0.0.0.0`. |
+| `CCP_GROUP_SUFFIX` | empty | validator, processor, monitor. Appended to the consumer group id; integration tests set it so they never move the real groups' offsets (D-050). |
 
 Topic names and group IDs are code constants, not configuration. Simulator settings are CLI flags.
 Logs are JSON lines on stdout.
@@ -244,7 +252,8 @@ uv, pip, temp, Docker CLI and kube locations to `D:\ccp-data\`, and the services
 - **Integration** (marked `integration`, runs only when `CCP_INTEGRATION=1`, against Compose): validator routing,
   processor idempotency (replay twice), shuffled replay, kill-and-restart, the monitor raising a single alert per hold,
   and the API against real MongoDB (D-037).
-- **Smoke:** `python -m ccp.demo` against Compose (locally and in CI). By default it spawns the services as host subprocesses (dev mode).
+- **Smoke:** `python -m ccp.demo` against Compose (locally and in CI). By default it spawns the services as host subprocesses (dev mode),
+  on its own `ccp_demo` database and `-demo` consumer groups, which it first moves to the end of each topic (D-058).
   With `--verify-only` it skips spawning and producing (the simulator runs separately via `docker compose run` or the k8s Job) and only compares `/stats` with `--expect`.
   It exits non-zero on any mismatch with the expected values.
 
@@ -265,9 +274,13 @@ uv, pip, temp, Docker CLI and kube locations to `D:\ccp-data\`, and the services
 
 - Clock skew between sources is not corrected: `occurred_at` is trusted as given.
 - The same logical event re-sent with a **new** `event_id` is not detected as a duplicate.
-- Each write re-reads all of the shipment's events, so the cost is O(events per shipment). This is fine for about 10 events per shipment, but not for long histories.
+- Each write re-reads all of the shipment's events, so the cost is O(events per shipment). Measured median per event
+  (`python scripts/bench_recompute.py`, worst case with one anomaly per event): 6.2 ms at 10 events, 8.7 ms at 100,
+  26.4 ms at 1,000, 59.2 ms at 5,000. Customs lifecycles have under 10 events, so this is fine; the upgrade for long
+  histories is an incremental fold when the new event sorts last (D-055).
 - A single Kafka broker with RF=1 and a single MongoDB node give no high availability. Without MongoDB transactions, the two writes are not atomic, and the recompute-on-duplicate step heals this.
-- `duplicates_dropped` includes crash-replay duplicates and can over-count by one per crash.
+- `duplicates_dropped` counts duplicates on the `validated` topic, so a validator crash that re-emits an event adds to it
+  (processor crashes and redeliveries no longer do, D-051).
 - Alerts are keyed by `(shipment_id, state_since)`. A late event that changes `state_since` can raise a second alert for the same
   hold, and alerts are never retracted.
 - The monitor compares event time against its own wall clock.
@@ -280,17 +293,17 @@ uv, pip, temp, Docker CLI and kube locations to `D:\ccp-data\`, and the services
 | # | Assumption | Phase |
 |---|---|---|
 | A1 | Kafka, MongoDB and Kafka UI fit within the D-039 limits on this 7.8 GB machine (0.8 GB free was measured with Docker stopped, so other apps must be closed) | P3 (prove with `docker stats`) |
-| A2 | kind, Kafka, MongoDB and 4 service Deployments fit in RAM, with Compose stopped | P11 (prove, or cut bullet 2: D-039) |
+| A2 | kind, Kafka, MongoDB and 4 service Deployments fit in RAM, with Compose stopped. **Verified (P11):** the node used 1.667 of 3.744 GiB (44.5%) with 3 processors; one reading (DECISIONS "P11 results"). | P11 |
 | A3 | `apache/kafka-native:4.3.1` runs single-node KRaft with two listeners using environment variables only. **The tag exists (verified 2026-10-11); its runtime behaviour is unverified.** Fallback: `apache/kafka:4.3.1`. | P3 |
 | A4 | `kafbat/kafka-ui:v1.5.0` works against KRaft (**the tag is verified; its behaviour is not**) | P3 |
 | A5 | `mongo:8.0.32` with root-user auth from env and a 0.25 GB cache works, and pymongo connects with `authSource=admin` | P3 |
 | A6 | `confluent-kafka` 2.16.0 installs without a compiler. **Wheels exist for cp311 win_amd64 and manylinux_2_28 x86_64 (verified); the install itself is unverified.** | P0, P10 |
 | A14 | Redirecting `DOCKER_CONFIG` to D: still reaches the Docker Desktop engine (the `desktop-linux` context), and uv with `UV_PYTHON_INSTALL_DIR` and `--no-bin` writes nothing to C: | P0 |
-| A15 | The kind node image and its PVCs live inside the Docker disk image, so they land on D: after the D-040 move | P11 |
+| A15 | The kind node image and its PVCs live inside the Docker disk image, so they land on D: after the D-040 move. **Verified (P11):** the Docker disk image is `D:\ccp-data\docker\docker_data.vhdx` (12.03 GB); the kind binary and the image tar went to `D:\ccp-data`. | P11 |
 | A7 | The idempotent producer works against a single broker with RF=1 | P4 |
 | A8 | The SIGINT/SIGTERM handler gives a clean close on the Windows host | P5 |
-| A9 | Recompute-per-event is fast enough at demo scale | P6, P9 |
+| A9 | Recompute-per-event is fast enough at demo scale. **Verified (P6):** 6.2 ms per event at 10 events per shipment (D-055). | P6, P9 |
 | A10 | In a clean run, the fold-based expected values equal the pipeline's output | P9 |
 | A11 | SIGTERM reaches the Python process when it is PID 1 (exec-form CMD) | P10 |
 | A12 | A GitHub-hosted runner can run the Compose smoke test within a reasonable time | P10 |
-| A13 | The eager rebalance with finish-in-flight, plus the `event_count` guard, means no stale status survives a scale-out | P11 |
+| A13 | The eager rebalance with finish-in-flight, plus the `event_count` guard, means no stale status survives a scale-out. **Partly verified (P11):** after scaling 3 → 1 → 3 the demo still matched (16/16), but the rebalances ran on an idle topic, not under load. | P11 |

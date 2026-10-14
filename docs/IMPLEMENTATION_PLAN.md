@@ -3,7 +3,7 @@
 > **Synthetic data** project. **Release 1** = P0–P10 (the full pipeline in Compose, plus CI). **Release 2** = P11–P12 (kind, polish).
 > Hard checkpoints come after **P6, P9 and P11**. After every phase: print `PHASE n DONE`, what changed, the acceptance output, and a suggested commit message, then wait.
 > Commands are shown one per line so they work in both PowerShell 5.1 and bash. `$C` stands for
-> `docker compose -f deploy/compose/docker-compose.yml`.
+> `docker compose --env-file .env -f deploy/compose/docker-compose.yml`, run from the repo root (D-044).
 
 ## Before P0: user actions (one-time; the only steps that are yours, D-040)
 1. Docker Desktop → Settings → Resources → Advanced → **Disk image location** → `D:\ccp-data\docker`, then apply (this moves the existing 4.8 GB off C:).
