@@ -29,6 +29,21 @@ if ((Test-Path $src) -and -not (Test-Path "$($env:DOCKER_CONFIG)\config.json")) 
     Copy-Item "$src\config.json" $env:DOCKER_CONFIG -ErrorAction SilentlyContinue
     if (Test-Path "$src\contexts") { Copy-Item "$src\contexts" $env:DOCKER_CONFIG -Recurse }
 }
+# The CLI looks for plugins (compose, buildx) under DOCKER_CONFIG, so point it back at Docker Desktop's, read-only.
+$cfgPath = "$($env:DOCKER_CONFIG)\config.json"
+if ((Test-Path $cfgPath) -and -not (Select-String -Quiet -Pattern 'cliPluginsExtraDirs' -Path $cfgPath)) {
+    $j = Get-Content $cfgPath -Raw | ConvertFrom-Json
+    $j | Add-Member -NotePropertyName cliPluginsExtraDirs -NotePropertyValue @("$src\cli-plugins")
+    # ASCII, not PowerShell 5.1's UTF-8 with BOM, which Docker's JSON parser rejects.
+    $j | ConvertTo-Json -Depth 10 | Set-Content $cfgPath -Encoding ascii
+}
+
+# Load .env (git-ignored) so host services and tests see the same values Compose uses (D-044).
+if (Test-Path "$Repo\.env") {
+    Get-Content "$Repo\.env" | ForEach-Object {
+        if ($_ -match '^\s*([A-Z_][A-Z0-9_]*)=(.*)$') { Set-Item -Path "Env:$($Matches[1])" -Value $Matches[2] }
+    }
+}
 
 $env:PATH = "$Data\bin;$env:PATH"
 if (Test-Path "$Repo\.venv\Scripts\Activate.ps1") { . "$Repo\.venv\Scripts\Activate.ps1" }

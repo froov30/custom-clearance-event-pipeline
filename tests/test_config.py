@@ -5,7 +5,7 @@ from ccp.common.config import Config, ConfigError
 
 def test_defaults():
     c = Config.from_env({})
-    assert c.kafka_bootstrap_servers == "localhost:9092"
+    assert c.kafka_bootstrap_servers == "127.0.0.1:9092"  # D-046
     assert (c.mongo_host, c.mongo_port, c.mongo_db) == ("localhost", 27017, "ccp")
     assert (c.hold_alert_seconds, c.monitor_scan_seconds) == (20, 5)
     assert c.heartbeat_dir == ".run"

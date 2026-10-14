@@ -30,12 +30,15 @@ class Config:
     monitor_scan_seconds: int
     heartbeat_dir: str
     log_level: str
+    group_suffix: str  # appended to consumer group ids; tests use it to stay isolated (D-050)
+    api_host: str  # 127.0.0.1 on the dev host; containers set 0.0.0.0
+    api_port: int
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Config":
         env = dict(os.environ) if env is None else env
         return cls(
-            kafka_bootstrap_servers=env.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"),
+            kafka_bootstrap_servers=env.get("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:9092"),  # D-046
             mongo_host=env.get("MONGO_HOST", "localhost"),
             mongo_port=_int(env, "MONGO_PORT", 27017),
             mongo_user=env.get("MONGO_USER", ""),
@@ -46,6 +49,9 @@ class Config:
             monitor_scan_seconds=_int(env, "MONITOR_SCAN_SECONDS", 5),
             heartbeat_dir=env.get("HEARTBEAT_DIR", ".run"),
             log_level=env.get("LOG_LEVEL", "INFO").upper(),
+            group_suffix=env.get("CCP_GROUP_SUFFIX", ""),
+            api_host=env.get("API_HOST", "127.0.0.1"),
+            api_port=_int(env, "API_PORT", 8000),
         )
 
     @property
